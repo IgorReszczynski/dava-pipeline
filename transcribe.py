@@ -138,20 +138,29 @@ def render_transcribe_ui() -> bool:
                         help="Leave on auto to detect it automatically.")
     n_spk = c2.number_input("Speakers (0 = auto)", 0, 20, 0, 1,
                             help="Set this only if you know how many people speak.")
-    gpu = c3.number_input("GPU index", 0, 8, 0, 1)
+    device = c3.selectbox("Device", ["auto", "cuda", "cpu"], 0,
+                          help="`auto` uses the GPU if the pipeline environment finds one, "
+                               "otherwise the CPU. Pick `cpu` on a machine without an NVIDIA GPU "
+                               "(including Apple Silicon Macs).")
+    on_cpu = device == "cpu"
 
-    c4, c5 = st.columns(2)
-    backend = c4.selectbox("ASR engine", ["openai", "transformers"], 0,
-                           help="`openai` is the OpenAI-Whisper engine (the default).")
-    clean = c5.checkbox("Clean audio first (remove music and noise)", value=True,
-                        help="Recommended. Uses Demucs to separate speech, then levels loudness.")
+    c4, c5, c6 = st.columns(3)
+    engines = ["openai", "transformers", "faster-whisper"]
+    backend = c4.selectbox("ASR engine", engines, engines.index("faster-whisper" if on_cpu else "openai"),
+                           help="`openai` is the OpenAI-Whisper engine (the GPU default). "
+                                "`faster-whisper` is much faster on a CPU.")
+    gpu = c5.number_input("GPU index", 0, 8, 0, 1, disabled=on_cpu)
+    clean = c6.checkbox("Clean audio first (remove music and noise)", value=not on_cpu,
+                        help="Uses Demucs to separate speech, then levels loudness. Recommended "
+                             "on a GPU; very slow on a CPU, so leave it off for clean recordings.")
 
-    hf = st.text_input("Hugging Face token (for speaker diarization)",
+    hf = st.text_input("Hugging Face token (optional, for speaker labels)",
                        value=os.environ.get("HF_TOKEN", ""), type="password",
-                       help="Needed to download the diarization models. Kept only in memory.")
+                       help="Needed to download the diarization models. Leave empty to "
+                            "transcribe without speaker labels. Kept only in memory.")
 
-    st.caption("Transcription can take several minutes and uses the GPU. The dashboard "
-               "is busy while it runs, which is normal.")
+    st.caption("Transcription can take several minutes on a GPU and much longer on a CPU. "
+               "The dashboard is busy while it runs, which is normal.")
 
     go = st.button("▶️ Transcribe", type="primary", disabled=(up is None))
     if not go:
@@ -160,9 +169,9 @@ def render_transcribe_ui() -> bool:
         st.warning("Upload an audio or video file first.")
         return False
     if not hf:
-        st.warning("A Hugging Face token is required for speaker diarization. Paste one "
-                   "above (huggingface.co, then Settings, then Access Tokens).")
-        return False
+        st.info("No Hugging Face token, so the transcript will have no speaker labels. "
+                "To add them, paste a token above (huggingface.co, then Settings, then "
+                "Access Tokens).")
 
     workdir = Path(tempfile.mkdtemp(prefix="dava_asr_"))
     raw = workdir / up.name
@@ -197,8 +206,9 @@ def render_transcribe_ui() -> bool:
         if clean:
             st.write("**Step 1 — cleaning the audio**")
             clean_wav = workdir / (raw.stem + "_clean16k.wav")
+            demucs_device = f"cuda:{int(gpu)}" if device == "cuda" else device
             cmd = py + [str(PREPROCESS), "--input", str(raw), "--output", str(clean_wav),
-                        "--device", "cuda", "--demucs-model", "htdemucs"]
+                        "--device", demucs_device, "--demucs-model", "htdemucs"]
             rc, _ = _run_streaming(cmd, REPO)
             if rc != 0 or not clean_wav.exists():
                 status.update(label="Cleaning failed", state="error")
@@ -210,8 +220,10 @@ def render_transcribe_ui() -> bool:
         # transcribe + diarize + align
         st.write("**Step 2 — transcribe, identify speakers, align**")
         cmd = py + [str(TRANSCRIBE), "--episode_path", str(audio_for_asr),
-                    "--out_dir", str(outdir), "--gpu_index", str(int(gpu)),
-                    "--asr_backend", backend, "--hf_token", hf]
+                    "--out_dir", str(outdir), "--device", device, "--gpu_index", str(int(gpu)),
+                    "--asr_backend", backend]
+        if hf:
+            cmd += ["--hf_token", hf]
         if lang != "auto":
             cmd += ["--language", lang]
         if int(n_spk) > 0:
@@ -220,8 +232,8 @@ def render_transcribe_ui() -> bool:
         if rc != 0:
             status.update(label="Transcription failed", state="error")
             st.error("Transcription failed. Check the log above. A common cause is a "
-                     "Hugging Face token that is missing, invalid, or has not accepted the "
-                     "diarization model's terms.")
+                     "Hugging Face token that is invalid or has not accepted the "
+                     "diarization model's terms (leave it empty to skip speaker labels).")
             return False
 
         jpath = _newest_whisperx_json(outdir)

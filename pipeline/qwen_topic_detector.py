@@ -317,7 +317,8 @@ def load_model(model_id: str, device_map: str = "auto", gpu_index: int = None):
     
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype="auto",
+        # bf16/fp16 weights are slow or unsupported on CPU; force float32 there.
+        torch_dtype=torch.float32 if device_map == "cpu" else "auto",
         device_map=device_map,
         trust_remote_code=True,
     )

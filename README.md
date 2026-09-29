@@ -56,6 +56,13 @@ python pipeline/process_single_file_pipeline_AG.py \
 streamlit run dashboard/app.py
 ```
 
+No NVIDIA GPU (laptop, Apple Silicon Mac)? Everything also runs on the CPU, just
+more slowly. Use `--device cpu --asr_backend faster-whisper` for transcription
+(int8 on the CPU, about twice as fast as the OpenAI engine there), and skip
+the Demucs cleaning step for clean recordings, since it is very slow on a CPU.
+`--asr_model small` trades some accuracy for speed; the CPU default is
+`large-v3-turbo`.
+
 To try the dashboard immediately without transcribing anything, launch it and load
 the bundled sample `samples/sample_clean16k_whisperx.json` in the sidebar, then
 press `Run analysis`.

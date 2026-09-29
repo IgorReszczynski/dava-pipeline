@@ -112,7 +112,7 @@ Ollama is not itself a model. It is a small program that downloads and runs larg
 ## 5. Prerequisites
 
 ### Hardware
-- **A computer with an NVIDIA graphics card (GPU) is strongly recommended.** Transcription, diarization and the language models run many times faster on a GPU. The transcription step in particular is slow without one.
+- **A computer with an NVIDIA graphics card (GPU) is strongly recommended.** Transcription, diarization and the language models run many times faster on a GPU. The transcription step in particular is slow without one. Without a GPU (for example on a laptop or an Apple Silicon Mac) everything still works on the processor (CPU): see the `--device cpu` option in Section 9.2.
 - **Disk space.** Allow at least fifteen to twenty gigabytes for the models that get downloaded on first use.
 
 ### Operating system
@@ -236,6 +236,8 @@ python pipeline/process_single_file_pipeline_AG.py \
 
 Useful options: `--language` sets the language (use `de`, `fr` or `en`, or leave it out to detect automatically); `--num_speakers` fixes the number of speakers if you know it; `--asr_backend openai` selects the OpenAI Whisper engine. The result is a JSON transcript in the output folder, ending in `_whisperx.json`.
 
+**Without a GPU.** Add `--device cpu --asr_backend faster-whisper`. The faster-whisper engine is the one built for processors and is noticeably faster there than the other two (about twice as fast as the OpenAI engine in our test). Expect transcription to take noticeably longer than on a GPU. The default model on a processor is `large-v3-turbo`; add `--asr_model small` for a quicker, somewhat less accurate transcript. The cleaning step in Section 9.1 is very slow on a processor (use `--device cpu` there too), so skip it for recordings that are already clean.
+
 ### 9.3 Analyse the transcript (environment: dava_env)
 
 You can run the analysis with one command, or simply press the **Run analysis** button in the dashboard ([Section 10](#10-running-the-dashboard)), which does the same thing. From the command line:
@@ -291,7 +293,7 @@ On the left is a sidebar where you load a transcript (upload a `_whisperx.json` 
 
 ### The Transcribe tab (create a transcript in the browser)
 
-The **Transcribe** tab turns a raw audio or video file into a transcript without the command line. Upload a file, set the language, the number of speakers, and the GPU, paste your Hugging Face token (or export `HF_TOKEN` before starting the dashboard so it is filled in for you), and press **Transcribe**. It cleans the audio, transcribes, identifies speakers, and aligns the words, showing a live log. When it finishes, the transcript loads automatically, you can download it there, and pressing **Run analysis** in the sidebar adds the topics, sentiment, emotion, and names.
+The **Transcribe** tab turns a raw audio or video file into a transcript without the command line. Upload a file, set the language, the number of speakers, and the device (leave it on `auto`, or pick `cpu` on a computer without an NVIDIA GPU, which also switches to the faster-whisper engine and turns off audio cleaning), optionally paste your Hugging Face token for speaker labels (or export `HF_TOKEN` before starting the dashboard so it is filled in for you; without a token the transcript has no speaker labels), and press **Transcribe**. It cleans the audio, transcribes, identifies speakers, and aligns the words, showing a live log. When it finishes, the transcript loads automatically, you can download it there, and pressing **Run analysis** in the sidebar adds the topics, sentiment, emotion, and names.
 
 Behind the scenes it runs the same `pipeline` scripts as the command line, in the `pipeline` environment, so nothing about the pipeline itself changes.
 
@@ -325,6 +327,7 @@ After analysis, each segment of the transcript JSON carries the following inform
 |---|---|
 | The Transcribe tab says `No module named 'demucs'` | Install it in the pipeline environment: `conda activate pipeline && pip install "demucs>=4.0"`, or untick **Clean audio first**. |
 | The Transcribe tab cannot find the pipeline environment | Set `DAVA_PIPELINE_PYTHON` to the pipeline interpreter (for example `~/miniconda3/envs/pipeline/bin/python`) before starting the dashboard. |
+| Transcription stops with `CUDA was requested but is not available` | There is no usable NVIDIA GPU. Run with `--device cpu` (or pick `cpu` as the device in the Transcribe tab). |
 | The deep-learning library says the NVIDIA driver is too old | Your library was built for a newer graphics driver than you have. Reinstall a matching version, for example with the `cu128` download index for a CUDA 12.8 driver. |
 | A download with curl returns only about nine bytes | That tiny file is an error page. The Ollama release file now ends in `.tar.zst`, not `.tgz`. Use the address in Section 8. |
 | Ollama reports `llama-server` binary not found | You are using the conda-forge package, which is incomplete. Use the `.tar.zst` release and make sure the `ollama` command points to the version in your home folder. |

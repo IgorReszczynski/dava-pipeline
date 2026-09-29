@@ -172,7 +172,19 @@ def sidebar():
         return
 
     # Peek at the file to see what's already there.
-    data = C.load_transcript(st.session_state["jpath"])
+    try:
+        data = C.load_transcript(st.session_state["jpath"])
+    except (ValueError, UnicodeDecodeError) as exc:  # JSONDecodeError is a ValueError
+        st.sidebar.error(
+            f"**{os.path.basename(st.session_state['jpath'])}** is not a WhisperX "
+            f"transcript JSON, so it can't be loaded ({exc}). Upload the "
+            "`…_whisperx.json` the pipeline produced, or create one in the "
+            "**🎙️ Transcribe** tab.")
+        # forget it, so the tabs fall back to their "load a transcript" hint
+        # (and the error shows again on rerun while the file is still selected)
+        for key in ("jpath", "workdir", "_src_name", "enriched", "summary"):
+            st.session_state.pop(key, None)
+        return
     segs = C.get_segments(data)
     status = is_enriched(segs)
     st.session_state["enriched"] = all(status.values())

@@ -168,7 +168,9 @@ CUDA_VISIBLE_DEVICES=3 python pipeline/process_single_file_pipeline_AG.py \
 
 Key flags: `--asr_backend openai` uses OpenAI-Whisper; `--language de` forces
 German (omit to auto-detect); `--num_speakers N` fixes the speaker count if you
-know it; `--skip_alignment` drops word-level timestamps if you don't need them.
+know it; `--skip_alignment` drops word-level timestamps if you don't need them;
+`--device cpu --asr_backend faster-whisper` runs without a GPU (int8 CTranslate2,
+default model `large-v3-turbo`, override with `--asr_model`).
 Output: `output/.../<name>_whisperx.json` — segments with `start`, `end`,
 `text`, `speaker`, `words`, and per-segment `detected_language`.
 

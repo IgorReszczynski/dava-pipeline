@@ -34,6 +34,8 @@ from collections import Counter
 import gc
 import soundfile as sf
 
+from asr_whisperx_AG import resolve_device, default_whisper_size, load_faster_whisper, faster_whisper_transcribe
+
 # Try to import tqdm for progress bar, fallback if not available
 try:
     from tqdm import tqdm
@@ -50,11 +52,11 @@ except ImportError:
 
 
 class BatchProcessor:
-    """Processes multiple files in batches, keeping models loaded in GPU memory."""
+    """Processes multiple files in batches, keeping models loaded in GPU (or CPU) memory."""
     
-    def __init__(self, gpu_index, asr_backend, asr_model, diarization_model, hf_token, forced_language=None, lang_detection_model_size="base", enable_topic_detection=False, topic_model_id="Qwen/Qwen3-0.6B", qwen_python_path=None, topic_verbose=False):
-        self.gpu_index = gpu_index
-        self.device = f"cuda:{gpu_index}"
+    def __init__(self, gpu_index, asr_backend, asr_model, diarization_model, hf_token, forced_language=None, lang_detection_model_size="base", enable_topic_detection=False, topic_model_id="Qwen/Qwen3-0.6B", qwen_python_path=None, topic_verbose=False, device="auto"):
+        # gpu_index becomes None on CPU
+        self.device, self.gpu_index = resolve_device(device, gpu_index)
         self.asr_backend = asr_backend
         self.asr_model_name = asr_model
         self.diarization_model = diarization_model
@@ -73,11 +75,6 @@ class BatchProcessor:
         self.lang_detection_model = None  # OpenAI Whisper model for language detection
         self.lang_detection_backend = "openai_whisper"  # Always using OpenAI Whisper
         # Topic detection uses external script with Qwen environment, no model loading here
-        
-        # Initialize GPU
-        torch.cuda.set_device(gpu_index)
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is not available.")
     
     def load_asr_model(self):
         """Load ASR model once."""
@@ -86,10 +83,12 @@ class BatchProcessor:
         
         if self.asr_backend == "transformers":
             model_name = self.asr_model_name or "distil-whisper/distil-large-v3.5"
+            # fp16 only on GPU; CPU kernels need float32
+            torch_dtype = torch.float16 if self.gpu_index is not None else torch.float32
             processor = AutoProcessor.from_pretrained(model_name)
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
                 model_name,
-                dtype=torch.float16,
+                dtype=torch_dtype,
             )
             model = model.to(self.device)
             
@@ -98,17 +97,19 @@ class BatchProcessor:
                 model=model,
                 tokenizer=processor.tokenizer,
                 feature_extractor=processor.feature_extractor,
-                device=self.gpu_index,
-                dtype=torch.float16,
+                device=self.gpu_index if self.gpu_index is not None else -1,  # -1 = CPU
+                dtype=torch_dtype,
                 ignore_warning=True,  # Suppress chunk_length_s warning
             )
         elif self.asr_backend == "openai":
             import whisper as openai_whisper
-            free_bytes, _ = torch.cuda.mem_get_info(self.gpu_index)
-            whisper_model_name = (
-                "large-v2" if free_bytes > 18 * 1024**3 else ("medium" if free_bytes > 8 * 1024**3 else "small")
-            )
+            whisper_model_name = self.asr_model_name or default_whisper_size(self.gpu_index)
             self.asr_pipeline = openai_whisper.load_model(whisper_model_name, device=self.device)
+        elif self.asr_backend == "faster-whisper":
+            model_name = self.asr_model_name or default_whisper_size(self.gpu_index)
+            self.asr_pipeline = load_faster_whisper(model_name, self.gpu_index, self.forced_language)
+        else:
+            raise ValueError(f"Unknown asr_backend {self.asr_backend!r}")
     
     def load_diarization_model(self):
         """Load diarization model once."""
@@ -202,10 +203,12 @@ class BatchProcessor:
                     if c.get("text")
                 ],
             }
+        elif self.asr_backend == "faster-whisper":
+            result = faster_whisper_transcribe(self.asr_pipeline, audio_data, self.gpu_index, self.forced_language)
         elif self.asr_backend == "openai":
             raw = self.asr_pipeline.transcribe(
                 wav_path,
-                fp16=True,
+                fp16=self.gpu_index is not None,  # CPU has no fp16 kernels
                 language=self.forced_language,
                 beam_size=1,
                 best_of=1,
@@ -414,8 +417,11 @@ class BatchProcessor:
                 script_path,
                 "--json_file", json_path,
                 "--model_id", self.topic_model_id,
-                "--gpu_index", str(self.gpu_index),
             ]
+            if self.gpu_index is not None:
+                cmd += ["--gpu_index", str(self.gpu_index)]
+            else:
+                cmd += ["--device_map", "cpu"]
             
             # Add verbose flag if enabled
             if self.topic_verbose:
@@ -652,16 +658,20 @@ def generate_speaker_json(csv_file, out_dir, lang, speaker_id):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Batch processing for ASR pipeline on GPU")
+    parser = argparse.ArgumentParser(description="Batch processing for ASR pipeline on GPU or CPU")
     parser.add_argument("--csv_file", required=True, help="CSV file with MP4 paths")
     parser.add_argument("--out_dir", required=True, help="Output directory")
     parser.add_argument("--batch_size", type=int, default=10, help="Number of files to process before generating speaker JSON")
     parser.add_argument("--lang", default="", help="Language code (optional)")
     parser.add_argument("--hf_token", default="", help="HuggingFace token")
     parser.add_argument("--num_speakers", default="", help="Number of speakers")
-    parser.add_argument("--gpu_index", type=int, default=6, help="GPU index")
-    parser.add_argument("--asr_backend", default="transformers", help="ASR backend")
-    parser.add_argument("--asr_model", default="distil-whisper/distil-large-v3.5", help="ASR model name")
+    parser.add_argument("--gpu_index", type=int, default=6, help="GPU index (ignored on CPU)")
+    parser.add_argument("--device", default="auto", help="auto (GPU if available), cuda, cuda:N or cpu")
+    parser.add_argument("--asr_backend", default="transformers", choices=["transformers", "openai", "faster-whisper"],
+                        help="ASR backend (faster-whisper is much faster on CPU)")
+    parser.add_argument("--asr_model", default=None,
+                        help="ASR model. transformers: HF repo (default distil-whisper/distil-large-v3.5); "
+                             "openai / faster-whisper: Whisper size (default: by free GPU memory, or large-v3-turbo on CPU)")
     parser.add_argument("--skip_alignment", action="store_true", help="Skip word-level alignment")
     parser.add_argument("--lang_detection_model", default="base", help="Language detection model size: tiny, base, small, medium, large (default: base)")
     parser.add_argument("--enable_topic_detection", action="store_true", help="Enable topic detection using Qwen model")
@@ -702,7 +712,8 @@ def main():
         enable_topic_detection=args.enable_topic_detection,
         topic_model_id=args.topic_model_id,
         qwen_python_path=args.qwen_python_path,
-        topic_verbose=args.topic_verbose
+        topic_verbose=args.topic_verbose,
+        device=args.device,
     )
     
     processor.load_asr_model()

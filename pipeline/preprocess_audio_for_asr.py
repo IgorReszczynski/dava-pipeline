@@ -203,6 +203,9 @@ def denoise(mono: np.ndarray, sr: int, method: str):
 def separate_vocals(path: str, device: str, model_name: str):
     """Run Demucs and return the vocal stem: (array [samples, ch], sample_rate)."""
     from demucs.api import Separator
+    if device == "auto":
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     _log(f"  Demucs '{model_name}' on {device} (slow step; downloads weights on first run)...")
     sep = Separator(model=model_name, device=device, progress=True)
     _origin, stems = sep.separate_audio_file(path)
@@ -224,8 +227,10 @@ def main() -> int:
     ap.add_argument("--input", required=True, help="Input audio/video file.")
     ap.add_argument("--output", default=None,
                     help="Output 16 kHz mono WAV. Default: <input>_clean16k.wav")
-    ap.add_argument("--device", default="cuda",
-                    help="Torch device for Demucs/DeepFilterNet: cuda, cuda:0, or cpu.")
+    ap.add_argument("--device", default="auto",
+                    help="Torch device for Demucs: auto (GPU if available), cuda, cuda:0, "
+                         "or cpu. Demucs is very slow on CPU; for clean recordings "
+                         "consider --keep-music.")
     ap.add_argument("--demucs-model", default="htdemucs",
                     help="Demucs model (htdemucs, htdemucs_ft = better+slower, mdx_extra).")
     ap.add_argument("--keep-music", action="store_true",
