@@ -1,8 +1,9 @@
 <#
 Lecture Live setup. Safe to run again: every step skips what is already done.
 
-  .\setup.ps1             everything, including the Whisper model (874 MB, resumes if interrupted)
-  .\setup.ps1 -SkipModel  everything except the model download
+  .\setup.ps1             everything, including the models: Whisper (874 MB), speakers (25 MB),
+                          Qwen (2.5 GB); downloads resume if interrupted
+  .\setup.ps1 -SkipModel  everything except the model downloads
 
 Needs: Python 3.12 (py launcher), Visual Studio 2022 Build Tools with "Desktop development
 with C++", CMake, the Vulkan SDK, and the AMD graphics driver.
@@ -89,43 +90,56 @@ if (Get-ChildItem $site -Filter "ggml-vulkan*.dll" -ErrorAction SilentlyContinue
 }
 
 # ---------------------------------------------------------------------------------------------
-$modelName = ConfigValue "asr_model"
-$modelsDir = Join-Path $Repo (ConfigValue "models_dir")
-$modelPath = Join-Path $modelsDir "ggml-$modelName.bin"
-$url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$modelName.bin"
-Step "Whisper model ($modelName)"
-if ($SkipModel) {
-    Write-Host "Skipped (-SkipModel). Run .\setup.ps1 again later to download $url"
-} else {
-    New-Item -ItemType Directory -Force $modelsDir | Out-Null
-    $head = & curl.exe -sIL --fail $url
-    if ($LASTEXITCODE -ne 0) { throw "Could not reach $url" }
+# Downloads resume where they stopped and are retried until the size matches the server's;
+# school Wi-Fi resets long downloads.
+function Download([string]$Url, [string]$Dest) {
+    $head = & curl.exe -sIL --fail $Url
+    if ($LASTEXITCODE -ne 0) { throw "Could not reach $Url" }
     $expected = [int64](($head | Select-String -Pattern "^content-length:\s*(\d+)" | Select-Object -Last 1).Matches[0].Groups[1].Value)
-    $have = if (Test-Path $modelPath) { (Get-Item $modelPath).Length } else { 0 }
-    if ($have -eq $expected) {
-        Write-Host "Already downloaded ($([math]::Round($expected / 1MB)) MB)."
-    } else {
-        if ($have -gt $expected) { throw "$modelPath is larger than the file on the server; delete it and run setup again." }
-        Write-Host "Downloading $([math]::Round($expected / 1MB)) MB (have $([math]::Round($have / 1MB)) MB, resuming)..."
-        Run "curl.exe" @("-L", "--fail", "--retry", "5", "-C", "-", "-o", $modelPath, $url)
-        $have = (Get-Item $modelPath).Length
-        if ($have -ne $expected) { throw "Download incomplete: $have of $expected bytes. Run setup again to resume." }
+    $have = if (Test-Path $Dest) { (Get-Item $Dest).Length } else { 0 }
+    if ($have -eq $expected) { Write-Host "Already downloaded ($([math]::Round($expected / 1MB)) MB)."; return }
+    if ($have -gt $expected) { throw "$Dest is larger than the file on the server; delete it and run setup again." }
+    Write-Host "Downloading $([math]::Round($expected / 1MB)) MB (have $([math]::Round($have / 1MB)) MB)..."
+    for ($i = 1; $i -le 30; $i++) {
+        & curl.exe -L --fail --retry 8 --retry-all-errors --retry-delay 5 -C - -o $Dest $Url
+        if ((Get-Item $Dest -ErrorAction SilentlyContinue).Length -eq $expected) { return }
+        Write-Host "Connection dropped; resuming (attempt $i)..."
+        Start-Sleep -Seconds 5
     }
+    throw "Download incomplete: $((Get-Item $Dest).Length) of $expected bytes. Run setup again to resume."
+}
+
+$modelsDir = Join-Path $Repo (ConfigValue "models_dir")
+New-Item -ItemType Directory -Force $modelsDir | Out-Null
+$models = @(
+    @{ What = "Whisper model"; File = "ggml-$(ConfigValue 'asr_model').bin";
+       Url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$(ConfigValue 'asr_model').bin" },
+    @{ What = "Speaker model"; File = (ConfigValue "speaker_model");
+       Url = "https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx" },
+    @{ What = "Qwen model (Obsidian notes)"; File = (ConfigValue "llm_model");
+       Url = "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/$(ConfigValue 'llm_model')" }
+)
+foreach ($m in $models) {
+    Step "$($m.What): $($m.File)"
+    if ($SkipModel) { Write-Host "Skipped (-SkipModel)."; continue }
+    Download $m.Url (Join-Path $modelsDir $m.File)
 }
 
 # ---------------------------------------------------------------------------------------------
-$spkName = ConfigValue "speaker_model"
-$spkPath = Join-Path $modelsDir $spkName
-Step "Speaker model ($spkName, 25 MB)"
-if ($SkipModel) {
-    Write-Host "Skipped (-SkipModel)."
-} elseif (Test-Path $spkPath) {
-    Write-Host "Already downloaded."
+$LlamaBuild = "b12068"
+$llamaServer = (ConfigValue "llama_server").Replace("~", $env:USERPROFILE).Replace("/", "\")
+Step "llama.cpp $LlamaBuild for Vulkan (runs Qwen on the GPU)"
+if (Test-Path $llamaServer) {
+    Write-Host "Already installed: $llamaServer"
 } else {
-    New-Item -ItemType Directory -Force $modelsDir | Out-Null
-    Run "curl.exe" @("-L", "--fail", "--retry", "5", "-C", "-", "-o", "$spkPath.part",
-                     "https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx")
-    Move-Item "$spkPath.part" $spkPath
+    $llamaDir = Split-Path $llamaServer
+    New-Item -ItemType Directory -Force $llamaDir | Out-Null
+    $zip = Join-Path (Split-Path $llamaDir) "llama-$LlamaBuild-bin-win-vulkan-x64.zip"
+    Download "https://github.com/ggml-org/llama.cpp/releases/download/$LlamaBuild/llama-$LlamaBuild-bin-win-vulkan-x64.zip" $zip
+    Expand-Archive -Path $zip -DestinationPath $llamaDir -Force
+    Remove-Item $zip
+    if (-not (Test-Path $llamaServer)) { throw "llama-server.exe is not where config.yaml expects it: $llamaServer" }
+    & $llamaServer --list-devices
 }
 
 # ---------------------------------------------------------------------------------------------

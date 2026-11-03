@@ -37,6 +37,17 @@ from .speakers import SpeakerTracker
 from .vad import SileroVad
 
 CONTEXT_CHARS = 400      # transcript tail given to Whisper as its prompt (it keeps <= 224 tokens)
+
+# GPU work per lecture, measured on a 26-minute lecture with large-v3-turbo on the Radeon 780M:
+# with previews every 2 s the GPU was busy the whole time, and 70% of that was previews.
+#   final_greedy    finished chunks decoded greedily (27% less GPU, ~1 word in 13 differs)
+#   preview_greedy  previews decoded greedily (12-37% less GPU per preview)
+#   preview_every   seconds between the end of one preview and the start of the next (None = no previews)
+PROFILES = {
+    "accuracy": dict(final_greedy=False, preview_greedy=False, preview_every=0.0),
+    "balanced": dict(final_greedy=False, preview_greedy=True, preview_every=4.0),
+    "saver": dict(final_greedy=True, preview_greedy=True, preview_every=None),
+}
 MIN_WHISPER_S = 1.0      # shorter chunks are padded with silence; whisper.cpp ignores input under 100 ms
 HISTORY_S = 10.0         # processed audio kept for "hear what the app hears"
 LEVEL_EVERY_S = 0.05
@@ -120,7 +131,6 @@ class Session:
     overflows: int = 0
     stopping: bool = False
     closed: bool = False
-    last_partial: float = 0.0
     started: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
 
     def __post_init__(self):
@@ -220,6 +230,9 @@ class Live:
         self.prompt = cfg.initial_prompt
         self.use_context = cfg.use_context
         self.speakers = cfg.speakers
+        self.profile = PROFILES[cfg.compute_profile]
+        self._preview_busy = False
+        self._preview_done_at = 0.0
         # Whisper worker
         self._cv = threading.Condition()
         self._finals: deque[tuple[Session, Chunk]] = deque()
@@ -395,14 +408,15 @@ class Live:
 
     def _maybe_preview(self, now: float):
         s = self.session
-        if s is None or now - s.last_partial < self.cfg.partial_interval_s:
+        every = self.profile["preview_every"]
+        if s is None or every is None or self._preview_busy or now - self._preview_done_at < every:
             return
         with self._session_lock:
             chunk = s.segmenter.current()
         if chunk is None or chunk.seconds < MIN_WHISPER_S:
             return
-        s.last_partial = now
         with self._cv:
+            self._preview_busy = True
             self._partial = (s, chunk)
             self._cv.notify()
 
@@ -438,7 +452,8 @@ class Live:
             x = np.concatenate([x, np.zeros(int(MIN_WHISPER_S * SR) - len(x), dtype=np.float32)])
         # a preview gives way as soon as a finished chunk is waiting
         abort = (lambda: bool(self._finals)) if preview else None
-        return self.engine.transcribe(x, self.language, self._prompt(s), abort), gain_db
+        greedy = self.profile["preview_greedy" if preview else "final_greedy"]
+        return self.engine.transcribe(x, self.language, self._prompt(s), abort, greedy=greedy), gain_db
 
     def _asr_loop(self):
         while True:
@@ -450,36 +465,44 @@ class Live:
                 else:
                     kind, (s, chunk) = "partial", self._partial
                     self._partial = None
-            if s.closed or (kind == "partial" and s.stopping):
-                continue
             try:
-                tr, gain_db = self._whisper(s, chunk, preview=kind == "partial")
+                self._process(kind, s, chunk)
+            finally:
+                if kind == "partial":
+                    self._preview_done_at = time.monotonic()
+                    self._preview_busy = False
+
+    def _process(self, kind: str, s: Session, chunk: Chunk):
+        if s.closed or (kind == "partial" and s.stopping):
+            return
+        try:
+            tr, gain_db = self._whisper(s, chunk, preview=kind == "partial")
+        except Exception:
+            self._fatal("whisper")
+            return
+        if kind == "partial":
+            if tr is None:
+                self.log("Preview stopped early so a finished chunk could go first "
+                         "(the whisper.cpp 'failed to encode/decode' line above is that stop).")
+            else:
+                self.emit("partial", Partial(chunk.id, tr.text))
+            return
+        speakers: list[int | None] = [None] * len(tr.segments)
+        if self.speakers and self.tracker is not None and tr.segments:
+            try:
+                speakers = self.tracker.label_segments(chunk.audio, tr.segments)
             except Exception:
-                self._fatal("whisper")
-                continue
-            speakers: list[int | None] = [None] * (len(tr.segments) if tr else 0)
-            if kind == "final" and self.speakers and self.tracker is not None and tr.segments:
-                try:
-                    speakers = self.tracker.label_segments(chunk.audio, tr.segments)
-                except Exception:
-                    self._fatal("speakers")
-                    continue
-            if kind == "partial":
-                if tr is None:
-                    self.log("Preview stopped early so a finished chunk could go first "
-                             "(the whisper.cpp 'failed to encode/decode' line above is that stop).")
-                else:
-                    self.emit("partial", Partial(chunk.id, tr.text))
-                continue
-            final = s.write_final(chunk, tr, gain_db, speakers)
-            self._last_rtf = tr.inference_s / chunk.seconds
-            self.emit("final", final)
-            with self._cv:
-                s.pending -= 1
-                done = s.stopping and s.pending == 0
-            self._emit_status()
-            if done:
-                self._finish(s)
+                self._fatal("speakers")
+                return
+        final = s.write_final(chunk, tr, gain_db, speakers)
+        self._last_rtf = tr.inference_s / chunk.seconds
+        self.emit("final", final)
+        with self._cv:
+            s.pending -= 1
+            done = s.stopping and s.pending == 0
+        self._emit_status()
+        if done:
+            self._finish(s)
 
     def shutdown(self):
         self.close_input()

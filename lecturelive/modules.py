@@ -1,4 +1,5 @@
 """Lecture modules (courses). Each module has a name and a folder; its sessions are saved there.
+A module can also have an Obsidian folder, where its lecture notes are written.
 
 The list lives in modules.json next to config.yaml. Removing a module only takes it off the
 list; its folder and recordings are never deleted.
@@ -19,10 +20,15 @@ INVALID = set('<>:"/\\|?*')
 class Module:
     name: str
     folder: str
+    vault_folder: str = ""     # "" = no Obsidian notes for this module
 
     @property
     def path(self) -> Path:
         return Path(self.folder)
+
+    @property
+    def vault_path(self) -> Path | None:
+        return Path(self.vault_folder) if self.vault_folder else None
 
 
 def check_name(name: str) -> str:
@@ -45,7 +51,7 @@ class ModuleStore:
         self.last: str | None = None
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
-            self.modules = [Module(m["name"], m["folder"]) for m in data["modules"]]
+            self.modules = [Module(m["name"], m["folder"], m.get("vault_folder", "")) for m in data["modules"]]
             self.last = data.get("last")
 
     def save(self):
@@ -58,13 +64,15 @@ class ModuleStore:
                 return m
         raise KeyError(f"No module called “{name}”.")
 
-    def add(self, name: str, folder: Path | None) -> Module:
+    def add(self, name: str, folder: Path | None, vault_folder: Path | None = None) -> Module:
         name = check_name(name)
         if any(m.name.lower() == name.lower() for m in self.modules):
             raise ValueError(f"There is already a module called “{name}”.")
         path = (folder if folder is not None else self.default_root / name).resolve()
         path.mkdir(parents=True, exist_ok=True)
-        module = Module(name, str(path))
+        if vault_folder is not None:
+            vault_folder.mkdir(parents=True, exist_ok=True)
+        module = Module(name, str(path), str(vault_folder) if vault_folder is not None else "")
         self.modules.append(module)
         self.modules.sort(key=lambda m: m.name.lower())
         self.save()

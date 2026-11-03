@@ -7,6 +7,7 @@ samples prepended as context, and returns a speech probability per frame.
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,11 @@ CONTEXT = 64
 
 
 def model_path() -> Path:
+    if getattr(sys, "frozen", False):   # packaged app: bundled by packaging/build.ps1
+        path = Path(sys._MEIPASS) / "silero_vad" / "data" / "silero_vad.onnx"
+        if not path.is_file():
+            raise FileNotFoundError(f"Silero VAD model missing from the app bundle: {path}")
+        return path
     spec = importlib.util.find_spec("silero_vad")
     if spec is None or not spec.submodule_search_locations:
         raise ModuleNotFoundError("The silero-vad package is not installed (pip install --no-deps silero-vad).")

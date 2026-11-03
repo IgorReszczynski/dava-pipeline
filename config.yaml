@@ -18,7 +18,7 @@ initial_prompt: ""                 # course vocabulary: names and terms Whisper 
 # Audio input
 input_device: "Microphone Array (Realtek(R) Audio)"                   # microphone name; "" = the Windows default input
 raw_capture: true                  # WASAPI raw mode: bypass Windows/driver mic effects (beamforming, noise suppression)
-input_gain_db: 0.0                 # manual gain, applied to everything (meter, VAD, recording, Whisper)
+input_gain_db: 5.0                 # manual gain, applied to everything (meter, VAD, recording, Whisper)
 agc: true                          # bring each chunk's speech level to agc_target_dbfs before Whisper
 agc_target_dbfs: -20.0
 agc_max_gain_db: 30.0
@@ -31,7 +31,7 @@ vad_min_silence_ms: 600            # length of pause that ends a chunk
 vad_speech_pad_ms: 300             # audio kept from before speech starts
 max_chunk_s: 25.0                  # vad mode: a chunk this long is cut at its quietest point
 continuous_chunk_s: 15.0           # continuous mode: chunk length (cut at the quietest point of its last 2 s)
-partial_interval_s: 2.0            # how often the unfinished chunk is transcribed for the live preview
+compute_profile: "balanced"        # "accuracy": previews every 2 s (GPU always busy); "balanced": greedy previews every 4 s (~1/3 GPU); "saver": no previews, greedy decoding (~1/10 GPU)
 
 # Speakers
 speakers: true                     # label who is speaking (voice embeddings on the CPU); never changes the text
@@ -42,6 +42,15 @@ speaker_threshold: 0.45            # voice similarity (0-1) needed to count as t
 output_dir: "transcripts"          # default parent folder for new modules; relative to this file
 save_audio: true                   # also save the 16 kHz mono recording as FLAC
 
+# Obsidian notes: after each lecture Qwen summarises the transcript into the vault's lecture template
+obsidian_vault: "G:/My Drive/main"            # "" = no notes
+obsidian_template: "2 Templates/Lecture.md"   # relative to the vault
+obsidian_modules: "1 Current/UZH"             # where new modules get their vault folder
+obsidian_attachments: "Attachments"           # where the lecture recordings go, relative to the vault
+llm_model: "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"   # in models_dir
+llama_server: "~/.venvs/llama.cpp/b12068/llama-server.exe"   # llama.cpp built for Vulkan
+llm_context: 32768                 # tokens; longer lectures are summarised in parts first
+
 # Window (docked to the right edge of the screen, top to bottom)
 panel_width: 0.30                  # share of the screen width
-background_opacity: 0.88           # 1.0 = solid; text always stays solid
+background_opacity: 0.72           # 1.0 = solid; text always stays solid

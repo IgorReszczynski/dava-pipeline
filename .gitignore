@@ -3,6 +3,10 @@ __pycache__/
 *.pyc
 .venv/
 
+# App builds (packaging/build.ps1)
+build/
+dist/
+
 # Whisper models (large; setup.ps1 downloads them)
 models/
 

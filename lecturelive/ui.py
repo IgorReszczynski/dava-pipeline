@@ -22,18 +22,18 @@ from pathlib import Path
 from PySide6.QtCore import (QEasingCurve, QEvent, QObject, QPoint, QPointF, QPropertyAnimation, QRectF, Qt, QTimer,
                             QUrl, QVariantAnimation, Signal)
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence, QPainter,
-                           QPainterPath, QPalette, QPen, QPixmap, QShortcut, QTextBlockFormat, QTextCharFormat,
-                           QTextCursor)
+                           QPainterPath, QPalette, QPen, QPixmap, QRadialGradient, QShortcut, QTextBlockFormat,
+                           QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QComboBox, QDialog, QFileDialog, QFrame,
-                               QHBoxLayout, QLabel, QLineEdit, QListView, QMenu, QMessageBox, QPlainTextEdit,
-                               QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedWidget, QTextEdit, QVBoxLayout,
-                               QWidget)
+                               QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit, QListView, QMenu,
+                               QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSlider,
+                               QStackedWidget, QTextEdit, QVBoxLayout, QWidget)
 
-from . import config, export
+from . import config, downloads, export, notes
 from .audio import InputDevice, list_input_devices, rescan
 from .dock import AppBar
 from .engine import language_codes
-from .live import Final, Level, Live, Partial, Status, hms, line
+from .live import PROFILES, Final, Level, Live, Partial, Status, hms, line
 from .modules import Module, ModuleStore, check_name
 
 APP = "Lecture Live"
@@ -63,7 +63,7 @@ TEXT_FONT = "Segoe UI Variable Text"
 DISPLAY_FONT = "Segoe UI Variable Display"
 ICON_FONT = "Segoe Fluent Icons"
 ICONS = dict(minimize="", close="", settings="", copy="", folder="",
-             refresh="", export="", remove="", chevron="", add="")
+             refresh="", export="", remove="", chevron="", add="", note="")
 SPEAKER_COLORS = ("primary", "tertiary", "secondary")
 
 LANGUAGE_NAMES = {
@@ -141,83 +141,156 @@ class Bridge(QObject):
 
 
 # ---------------------------------------------------------------------------------------------- widgets
+def morph_path(cx: float, cy: float, radius: float, t: float, rotation: float, lobes: int = 9,
+               depth: float = 0.075, points: int = 180) -> QPainterPath:
+    """A shape between a scalloped "cookie" (t=0) and a squircle (t=1), from the Material 3
+    Expressive shape set, drawn in polar form so the two can be blended for a morph."""
+    path = QPainterPath()
+    for i in range(points + 1):
+        a = 2 * math.pi * i / points
+        cookie = radius * (1 + depth * math.cos(lobes * (a + rotation)))
+        c, s = abs(math.cos(a)), abs(math.sin(a))
+        squircle = radius * 0.92 / (c ** 5 + s ** 5) ** 0.2
+        r = cookie + (squircle - cookie) * t
+        pt = QPointF(cx + r * math.cos(a), cy + r * math.sin(a))
+        path.moveTo(pt) if i == 0 else path.lineTo(pt)
+    path.closeSubpath()
+    return path
+
+
 class RecordButton(QAbstractButton):
-    """Circle when idle; morphs to a rounded square (large-increased, 20) while recording."""
-    SIZE = 72
+    """Material 3 Expressive record button. Idle: a softly scalloped cookie with a microphone.
+    Recording: it morphs into a squircle with a stop sign, and a halo behind it turns and grows
+    with the input level, so you can see the app hearing the room. Stopping: a spinner."""
+    SIZE = 112          # widget; the shape is about 76 px across, the rest is room for the halo
+    RADIUS = 36
 
     def __init__(self, t: dict):
         super().__init__()
         self.t = t
         self.mode = "idle"          # idle | recording | stopping
-        self._radius = self.SIZE / 2
+        self._t = 0.0               # 0 = cookie, 1 = squircle
+        self._scale = 1.0
         self._spin = 0.0
+        self._level = 0.0           # 0..1, smoothed input level
+        self._target_level = 0.0
         self.setFixedSize(self.SIZE, self.SIZE)
         self.setCursor(Qt.PointingHandCursor)
         self.setAttribute(Qt.WA_Hover)
-        self._morph = QVariantAnimation(self, duration=450, easingCurve=QEasingCurve.OutBack)
-        self._morph.valueChanged.connect(self._set_radius)
-        self._spinner = QTimer(self, interval=16, timeout=self._advance)
-        self.pressed.connect(lambda: self._animate_to(self._target() - 6))
-        self.released.connect(lambda: self._animate_to(self._target()))
+        self._morph = QVariantAnimation(self, duration=550, easingCurve=QEasingCurve.OutBack)
+        self._morph.valueChanged.connect(lambda v: self._set("_t", v))
+        self._squish = QVariantAnimation(self, duration=260, easingCurve=QEasingCurve.OutBack)
+        self._squish.valueChanged.connect(lambda v: self._set("_scale", v))
+        self._tick = QTimer(self, interval=33, timeout=self._advance)   # ~30 fps, only while it moves
+        self.pressed.connect(lambda: self._squish_to(0.9))
+        self.released.connect(lambda: self._squish_to(1.0))
+        shadow = QGraphicsDropShadowEffect(self, blurRadius=28, offset=QPointF(0, 6))
+        shadow.setColor(QColor(0, 0, 0, 90))
+        self.setGraphicsEffect(shadow)
 
-    def _target(self) -> float:
-        return self.SIZE / 2 if self.mode == "idle" else SHAPE["lg_inc"]
-
-    def _set_radius(self, r):
-        self._radius = float(r)
+    def _set(self, name: str, v):
+        setattr(self, name, float(v))
         self.update()
 
-    def _animate_to(self, r: float):
-        self._morph.stop()
-        self._morph.setStartValue(self._radius)
-        self._morph.setEndValue(float(r))
-        self._morph.start()
-
-    def _advance(self):
-        self._spin = (self._spin + 6) % 360
-        self.update()
+    def _squish_to(self, s: float):
+        self._squish.stop()
+        self._squish.setStartValue(self._scale)
+        self._squish.setEndValue(s)
+        self._squish.start()
 
     def set_mode(self, mode: str):
         self.mode = mode
-        self._animate_to(self._target())
-        if mode == "stopping":
-            self._spinner.start()
-        else:
-            self._spinner.stop()
+        self._morph.stop()
+        self._morph.setStartValue(self._t)
+        self._morph.setEndValue(0.0 if mode == "idle" else 1.0)
+        self._morph.start()
+        self._update_ticking()
+
+    def set_level(self, rms_db: float):
+        """Input level in dBFS; -50 dB and below is still, -12 dB fills the halo."""
+        db = rms_db if math.isfinite(rms_db) else -90.0
+        self._target_level = max(0.0, min(1.0, (db + 50) / 38))
+
+    def enterEvent(self, ev):
+        self._update_ticking(hover=True)
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._update_ticking(hover=False)
+        super().leaveEvent(ev)
+
+    def _update_ticking(self, hover: bool | None = None):
+        moving = self.mode != "idle" or (self.underMouse() if hover is None else hover)
+        if moving and not self._tick.isActive():
+            self._tick.start()
+        elif not moving:
+            self._tick.stop()
+
+    def _advance(self):
+        speed = {"recording": 0.9, "stopping": 7.0}.get(self.mode, 0.35)   # degrees per frame
+        self._spin = (self._spin + speed) % 360
+        self._level += (self._target_level - self._level) * 0.25
+        self.update()
 
     def paintEvent(self, _):
         t = self.t
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect())
-        if not self.isEnabled():
-            bg, fg = qcolor(t["on_surface"], 0.12), qcolor(t["on_surface"], 0.38)
-        elif self.mode == "recording":
-            bg, fg = QColor(t["error"]), QColor(t["on_error"])
-        elif self.mode == "stopping":
-            bg, fg = QColor(t["surface_container_highest"]), QColor(t["primary"])
-        else:
-            bg, fg = QColor(t["primary"]), QColor(t["on_primary"])
-        r = min(self._radius, rect.height() / 2)
+        cx = cy = self.SIZE / 2
+        R = self.RADIUS * self._scale
+        rot = math.radians(self._spin)
+        recording = self.mode == "recording" and self.isEnabled()
         p.setPen(Qt.NoPen)
-        p.setBrush(bg)
-        p.drawRoundedRect(rect, r, r)
-        if self.isEnabled() and (self.underMouse() or self.isDown()):
-            p.setBrush(qcolor(fg.name(), 0.12 if self.isDown() else 0.08))
-            p.drawRoundedRect(rect, r, r)
-        c = rect.center()
+
+        if recording or (self.underMouse() and self.isEnabled()):
+            halo_color = "#E5484D" if recording else t["primary"]
+            grow = 1.14 + (0.26 * self._level if recording else 0.04)
+            alpha = (0.16 + 0.22 * self._level) if recording else 0.12
+            p.setBrush(qcolor(halo_color, alpha))
+            p.drawPath(morph_path(cx, cy, R * grow, 0.0, -rot * 0.6, lobes=12, depth=0.06))
+
+        if not self.isEnabled():
+            fill = qcolor(t["on_surface"], 0.12)
+            fg = qcolor(t["on_surface"], 0.38)
+        else:
+            if recording:
+                top, bottom, fg = QColor("#FF6B6F"), QColor("#C62A2F"), QColor("#FFFFFF")
+            elif self.mode == "stopping":
+                top = QColor(t["surface_container_highest"]).lighter(115)
+                bottom, fg = QColor(t["surface_container_highest"]), QColor(t["primary"])
+            else:
+                base = QColor(t["primary"])
+                top, bottom, fg = base.lighter(118), base.darker(112), QColor(t["on_primary"])
+            fill = QRadialGradient(QPointF(cx - R * 0.45, cy - R * 0.55), R * 2.1)
+            fill.setColorAt(0.0, top)
+            fill.setColorAt(1.0, bottom)
+        body = morph_path(cx, cy, R, self._t, rot if self.mode == "idle" else 0.0)
+        p.setBrush(fill)
+        p.drawPath(body)
+        # a thin highlight along the top edge gives the surface some depth
+        p.setPen(QPen(QColor(255, 255, 255, 46 if self.isEnabled() else 0), 1.2))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(body)
+        if self.isDown():
+            p.setPen(Qt.NoPen)
+            p.setBrush(qcolor(fg.name(), 0.12))
+            p.drawPath(body)
+
+        p.setPen(Qt.NoPen)
         p.setBrush(fg)
         if self.mode == "recording":
-            p.drawRoundedRect(QRectF(c.x() - 12, c.y() - 12, 24, 24), 6, 6)
+            p.drawRoundedRect(QRectF(cx - 12, cy - 12, 24, 24), 7, 7)
         elif self.mode == "stopping":
             pen = QPen(fg)
             pen.setWidthF(4)
             pen.setCapStyle(Qt.RoundCap)
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
-            p.drawArc(QRectF(c.x() - 14, c.y() - 14, 28, 28), int(-self._spin * 16), 270 * 16)
+            p.drawArc(QRectF(cx - 14, cy - 14, 28, 28), int(-self._spin * 16), 270 * 16)
         else:
-            p.drawEllipse(c, 13, 13)
+            p.setPen(fg)
+            p.setFont(font(28 * self._scale, family=ICON_FONT))
+            p.drawText(QRectF(cx - R, cy - R, 2 * R, 2 * R), Qt.AlignCenter, "")   # microphone
         p.end()
 
 
@@ -441,7 +514,7 @@ class ModuleItem(QAbstractButton):
     """M3 list item on a tonal card: letter avatar, name, folder, remove button."""
     remove_requested = Signal(str)
 
-    def __init__(self, t: dict, module: Module, current: bool):
+    def __init__(self, t: dict, module: Module, current: bool, vault: Path | None):
         super().__init__()
         self.t = t
         self.module = module
@@ -449,14 +522,20 @@ class ModuleItem(QAbstractButton):
         self.setCursor(Qt.PointingHandCursor)
         self.setAttribute(Qt.WA_Hover)
         self.setMinimumHeight(72)
-        self.setToolTip(f"Record into {module.folder}")
+        where = module.folder
+        if module.vault_path is not None:
+            rel = module.vault_folder
+            if vault is not None and module.vault_path.is_relative_to(vault):
+                rel = module.vault_path.relative_to(vault).as_posix()
+            where = f"Obsidian · {rel}"
+        self.setToolTip(f"Recordings: {module.folder}\nNotes: {module.vault_folder or 'none'}")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(68, 10, 8, 10)
         texts = QVBoxLayout()
         texts.setSpacing(0)
         name = QLabel(module.name)
         name.setObjectName("rowTitle")
-        folder = ElidedLabel(module.folder)
+        folder = ElidedLabel(where)
         folder.setObjectName("rowSupport")
         for w in (name, folder):
             w.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -542,6 +621,9 @@ class MainWindow(QWidget):
         self.store = ModuleStore(cfg.output_path)
         self.module: Module | None = None
         self.new_folder: Path | None = None    # folder chosen for a new module (None = default)
+        self.new_vault_folder: Path | None = None
+        self.note_path: Path | None = None
+        self.note_busy = False
         self.last_speaker: int | None = None
 
         self._build()
@@ -563,9 +645,6 @@ class MainWindow(QWidget):
         outer.setSpacing(14)
 
         top = QHBoxLayout()
-        self.title_lbl = QLabel(APP)
-        self.title_lbl.setObjectName("title")
-        top.addWidget(self.title_lbl)
         self.module_chip = QPushButton()
         self.module_chip.setObjectName("chip")
         self.module_chip.setCursor(Qt.PointingHandCursor)
@@ -645,6 +724,16 @@ class MainWindow(QWidget):
         ], self.cfg.segmentation)
         self.mode.changed.connect(self._mode_changed)
         sl.addWidget(self.mode)
+
+        sl.addWidget(caption("GPU use"))
+        self.profile = SegmentedButtons(t, [
+            ("Accuracy", "accuracy", "Previews every 2 s with the full beam. The GPU is busy the whole lecture."),
+            ("Balanced", "balanced", "Same final text; quicker previews every 4 s. About a third of the GPU."),
+            ("Saver", "saver", "No live preview, faster decoding. About a tenth of the GPU; "
+                               "text appears when each sentence ends."),
+        ], self.cfg.compute_profile)
+        self.profile.changed.connect(self._profile_changed)
+        sl.addWidget(self.profile)
 
         sl.addWidget(caption("Gain"))
         gain_row = QHBoxLayout()
@@ -732,6 +821,10 @@ class MainWindow(QWidget):
         info.addWidget(self.stats_lbl)
         info.addWidget(self.warn_lbl)
         foot.addLayout(info, 1)
+        self.note_btn = IconButton(ICONS["note"], "Open the lecture note in Obsidian")
+        self.note_btn.clicked.connect(self._open_note)
+        self.note_btn.setVisible(False)
+        foot.addWidget(self.note_btn)
         copy = IconButton(ICONS["copy"], "Copy the transcript")
         copy.clicked.connect(self._copy)
         folder = IconButton(ICONS["folder"], "Open the session folder")
@@ -793,6 +886,16 @@ class MainWindow(QWidget):
         browse.clicked.connect(self._choose_folder)
         frow.addWidget(browse)
         al.addLayout(frow)
+        al.addWidget(caption("Obsidian notes"))
+        orow = QHBoxLayout()
+        self.new_vault_lbl = ElidedLabel()
+        self.new_vault_lbl.setObjectName("rowSupport")
+        orow.addWidget(self.new_vault_lbl, 1)
+        vbrowse = QPushButton("Choose folder…")
+        vbrowse.setObjectName("text")
+        vbrowse.clicked.connect(self._choose_vault_folder)
+        orow.addWidget(vbrowse)
+        al.addLayout(orow)
         arow = QHBoxLayout()
         arow.addStretch(1)
         cancel = QPushButton("Cancel")
@@ -863,8 +966,8 @@ class MainWindow(QWidget):
             QLabel#warn {{ font: 600 12px "{TEXT_FONT}"; color: {t['error']}; }}
             QScrollArea#sheetWrap {{ background: transparent; border: none; }}
             QScrollArea#sheetWrap > QWidget > QWidget {{ background: transparent; }}
-            QFrame#sheet {{ background: {rgba(t['surface_container_high'], 0.92)}; border-radius: {SHAPE['lg_inc']}px; }}
-            QTextEdit#transcript {{ background: {rgba(t['surface_container_low'], 0.55)}; border: none;
+            QFrame#sheet {{ background: {rgba(t['surface_container_high'], 0.78)}; border-radius: {SHAPE['lg_inc']}px; }}
+            QTextEdit#transcript {{ background: {rgba(t['surface_container_low'], 0.4)}; border: none;
                                     border-radius: {SHAPE['lg_inc']}px; padding: 10px 12px;
                                     selection-background-color: {t['primary_container']};
                                     selection-color: {t['on_primary_container']}; }}
@@ -987,7 +1090,6 @@ class MainWindow(QWidget):
         if self.state != "idle":
             return
         self._fill_modules()
-        self.title_lbl.setVisible(True)
         self.module_chip.setVisible(False)
         self._show_add_form(not self.store.modules)
         self.stack.setCurrentIndex(0)
@@ -999,7 +1101,7 @@ class MainWindow(QWidget):
                 w.hide()
                 w.deleteLater()
         for m in self.store.modules:
-            item = ModuleItem(self.t, m, current=m.name == self.store.last)
+            item = ModuleItem(self.t, m, current=m.name == self.store.last, vault=self.cfg.vault_path)
             item.clicked.connect(lambda _=False, name=m.name: self._pick_module(name))
             item.remove_requested.connect(self._remove_module)
             self.module_list.addWidget(item)
@@ -1019,7 +1121,6 @@ class MainWindow(QWidget):
         self.module_chip.setText(f"{self.module.name}")
         self.module_chip.setIcon(glyph_icon(ICONS["folder"], self.t["on_surface_variant"], 14))
         self.module_chip.setToolTip(f"{self.module.folder}\nClick to change module")
-        self.title_lbl.setVisible(False)
         self.module_chip.setVisible(True)
         self.stack.setCurrentIndex(1)
         self._set_state(self.state)
@@ -1030,14 +1131,29 @@ class MainWindow(QWidget):
         if show:
             self.new_name.clear()
             self.new_folder = None
+            self.new_vault_folder = None
             self._new_name_changed("")
             self.new_name.setFocus()
 
+    def _default_vault_folder(self, name: str) -> Path | None:
+        vault = self.cfg.vault_path
+        return vault / self.cfg.obsidian_modules / name if vault is not None else None
+
     def _new_name_changed(self, text: str):
+        name = text.strip() or "…"
         if self.new_folder is None:
-            name = text.strip() or "…"
             self.new_folder_lbl.set_full_text(str(self.store.default_root / name))
+        if self.new_vault_folder is None:
+            v = self._default_vault_folder(name)
+            self.new_vault_lbl.set_full_text(str(v) if v else "No vault set (obsidian_vault in config.yaml)")
         self.add_confirm.setEnabled(bool(text.strip()))
+
+    def _choose_vault_folder(self):
+        start = str(self.new_vault_folder or self.cfg.vault_path or Path.home())
+        picked = QFileDialog.getExistingDirectory(self, "Obsidian folder for this module's notes", start)
+        if picked:
+            self.new_vault_folder = Path(picked)
+            self.new_vault_lbl.set_full_text(picked)
 
     def _choose_folder(self):
         start = str(self.new_folder or self.store.default_root)
@@ -1048,8 +1164,9 @@ class MainWindow(QWidget):
 
     def _add_module(self):
         try:
-            check_name(self.new_name.text())
-            module = self.store.add(self.new_name.text(), self.new_folder)
+            name = check_name(self.new_name.text())
+            vault_folder = self.new_vault_folder or self._default_vault_folder(name)
+            module = self.store.add(name, self.new_folder, vault_folder)
         except ValueError as exc:
             self._error_box("Can't add this module", str(exc))
             return
@@ -1073,6 +1190,9 @@ class MainWindow(QWidget):
         menu.setAttribute(Qt.WA_TranslucentBackground)
         for kind, (label, _filt, _ext, _fn) in export.KINDS.items():
             menu.addAction(label, lambda k=kind: self._export(k))
+        menu.addSeparator()
+        act = menu.addAction("Lecture note in Obsidian (Qwen)", self._note_for_session)
+        act.setEnabled(not self.note_busy and self.cfg.vault_path is not None)
         size = menu.sizeHint()
         corner = self.export_btn.mapToGlobal(self.export_btn.rect().topRight())
         menu.exec(QPoint(corner.x() - size.width(), corner.y() - size.height() - 6))
@@ -1105,12 +1225,103 @@ class MainWindow(QWidget):
 
         threading.Thread(target=work, name="export", daemon=True).start()
 
+    # ------------------------------------------------------------------ obsidian notes
+    def _note_for_session(self):
+        folder = self.session_folder
+        if folder is None or self.state != "idle":
+            start = str(self.module.path if self.module else self.cfg.output_path)
+            picked = QFileDialog.getExistingDirectory(self, "Choose a recorded lecture", start)
+            if not picked:
+                return
+            folder = Path(picked)
+        module = next((m for m in self.store.modules if folder.parent == m.path), None)
+        if module is None:
+            self._error_box("No module for this lecture",
+                            f"{folder} is not inside a module's folder, so it is unclear which Obsidian folder "
+                            "the note belongs in.")
+            return
+        self._make_note(folder, module)
+
+    def _make_note(self, folder: Path, module: Module):
+        if module.vault_path is None:
+            self._error_box("No Obsidian folder", f"The module “{module.name}” has no Obsidian folder.")
+            return
+        self.note_busy = True
+        self.note_btn.setVisible(False)
+        self._status("Writing the Obsidian note…")
+
+        def work():
+            try:
+                path = notes.write_note(self.cfg, module, folder,
+                                        lambda text: self.bridge.event.emit("note_progress", text))
+                self.bridge.event.emit("note_done", path)
+            except Exception as exc:
+                self.bridge.event.emit("note_error", (f"{type(exc).__name__}: {exc}", traceback.format_exc()))
+
+        threading.Thread(target=work, name="note", daemon=True).start()
+
+    def _open_note(self):
+        if self.note_path is None:
+            return
+        from urllib.parse import quote
+        if not QDesktopServices.openUrl(QUrl("obsidian://open?path=" + quote(str(self.note_path), safe=""))):
+            self._error_box("Could not open Obsidian",
+                            f"Windows has no app for obsidian:// links. The note is here:\n{self.note_path}")
+
+    def _note_finished(self):
+        self.note_busy = False
+        if self.quit_after_finish and self.state == "idle":
+            self.close()
+
     # ------------------------------------------------------------------ startup
     def _startup(self):
         self._show_picker()
         self._dock()
         self._refresh_devices(initial=True)
-        threading.Thread(target=self._load_engine, name="load", daemon=True).start()
+        need = downloads.absent(self.cfg)
+        if need:
+            self._offer_download(need)
+        else:
+            threading.Thread(target=self._load_engine, name="load", daemon=True).start()
+
+    def _offer_download(self, need: list):
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            sizes = [downloads.remote_size(f.url) for f in need]
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            self._status("Models missing", error=True)
+            self._error_box("Models missing", "Lecture Live needs to download its models once, but the download "
+                            f"server can't be reached:\n{exc}\n\nConnect to the internet and start the app again.",
+                            traceback.format_exc())
+            return
+        QApplication.restoreOverrideCursor()
+        listing = "\n".join(f"•  {f.what}: {s / 1e9:.2f} GB" for f, s in zip(need, sizes))
+        answer = QMessageBox.question(
+            self, APP, f"Lecture Live needs to download these models once ({sum(sizes) / 1e9:.1f} GB):\n\n"
+            f"{listing}\n\nThey are kept in {self.cfg.models_path}. Download now?\n"
+            "An interrupted download continues where it stopped next time.")
+        if answer != QMessageBox.Yes:
+            self._status("Models missing; start the app again to download them", error=True)
+            return
+
+        def work():
+            try:
+                for f, total in zip(need, sizes):
+                    shown = [-1]
+
+                    def progress(have, f=f, total=total):
+                        pct = int(have * 100 / total)
+                        if pct != shown[0]:
+                            shown[0] = pct
+                            self.bridge.event.emit("dl_progress", f"Downloading {f.what} · {pct}% "
+                                                                  f"({have / 1e9:.2f} of {total / 1e9:.2f} GB)")
+                    downloads.download(f, total, progress)
+                self.bridge.event.emit("dl_done", None)
+            except Exception as exc:
+                self.bridge.event.emit("dl_error", (f"{type(exc).__name__}: {exc}", traceback.format_exc()))
+
+        threading.Thread(target=work, name="download", daemon=True).start()
 
     def _load_engine(self):
         try:
@@ -1187,6 +1398,10 @@ class MainWindow(QWidget):
 
     def _mode_changed(self, value: str):
         self.cfg.segmentation = value
+
+    def _profile_changed(self, value: str):
+        self.cfg.compute_profile = value
+        self.live.profile = PROFILES[value]
 
     def _lang_changed(self, _):
         self.live.language = self.lang_box.currentData()
@@ -1270,6 +1485,7 @@ class MainWindow(QWidget):
     def _on_event(self, kind: str, payload):
         if kind == "level":
             self.meter.set_level(payload)
+            self.rec_btn.set_level(payload.rms_db)
         elif kind == "partial":
             self._on_partial(payload)
         elif kind == "final":
@@ -1298,6 +1514,31 @@ class MainWindow(QWidget):
                 self.spk_sw.setEnabled(False)
                 self.spk_sw.setToolTip(f"Speaker model not found: {self.cfg.speaker_model_path}")
             self._set_state(self.state)
+        elif kind == "dl_progress":
+            self._status(payload)
+        elif kind == "dl_done":
+            self._status("Loading Whisper…")
+            threading.Thread(target=self._load_engine, name="load", daemon=True).start()
+        elif kind == "dl_error":
+            message, tb = payload
+            self._status("Model download failed", error=True)
+            self._error_box("Model download failed", message + "\n\nStart the app again to continue the download.", tb)
+        elif kind == "note_progress":
+            if self.state == "idle":
+                self._status(payload)
+        elif kind == "note_done":
+            self.note_path = payload
+            self.note_btn.setVisible(True)
+            self.note_btn.setToolTip(f"Open in Obsidian: {payload.name}")
+            if self.state == "idle":
+                self._status(f"In Obsidian · {payload.stem}")
+            self._note_finished()
+        elif kind == "note_error":
+            message, tb = payload
+            if self.state == "idle":
+                self._status("The Obsidian note failed", error=True)
+            self._note_finished()
+            self._error_box("Obsidian note failed", message + "\n\nThe recording and transcript are saved.", tb)
         elif kind == "export_done":
             self.export_btn.setEnabled(True)
             self.stats_lbl.setText(f"Exported · {payload.name}")
@@ -1397,6 +1638,9 @@ class MainWindow(QWidget):
         self._set_state("idle")
         self._status(f"Saved · {folder.name}")
         self.status_lbl.setToolTip(str(folder))
+        # straight into Obsidian when the module has a vault folder
+        if self.module is not None and self.module.vault_path is not None and self.cfg.vault_path is not None:
+            self._make_note(folder, self.module)
         if self.quit_after_finish:
             self.close()
 
@@ -1416,9 +1660,14 @@ class MainWindow(QWidget):
             self.cfg.speakers = self.spk_sw.isChecked()
         config.save({k: getattr(self.cfg, k) for k in (
             "input_device", "raw_capture", "input_gain_db", "agc", "lang", "segmentation",
-            "initial_prompt", "use_context", "speakers")})
+            "initial_prompt", "use_context", "speakers", "compute_profile")})
 
     def closeEvent(self, ev):
+        if self.note_busy:
+            self.quit_after_finish = True
+            self._status("Finishing the Obsidian note, then closing…")
+            ev.ignore()
+            return
         if self.state != "idle":
             if self.state == "recording":
                 answer = QMessageBox.question(self, APP, "A lecture is being recorded.\n\n"

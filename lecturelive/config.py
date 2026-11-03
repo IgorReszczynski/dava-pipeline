@@ -8,15 +8,26 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from dataclasses import dataclass, fields
 from pathlib import Path
 
 import yaml
 
+FROZEN = getattr(sys, "frozen", False)      # running as the packaged Lecture Live.exe
 REPO = Path(__file__).resolve().parent.parent
-CONFIG_PATH = REPO / "config.yaml"
+# The packaged app keeps config.yaml (and with it models/ and modules.json) next to the .exe.
+APP_DIR = Path(sys.executable).resolve().parent if FROZEN else REPO
+CONFIG_PATH = APP_DIR / "config.yaml"
+
+
+def resolve(path: str) -> Path:
+    """A path from config.yaml: ~ is the home folder; relative paths are relative to config.yaml."""
+    p = Path(path).expanduser()
+    return p if p.is_absolute() else (CONFIG_PATH.parent / p)
 
 SEGMENTATION_MODES = ("vad", "continuous")
+COMPUTE_PROFILES = ("accuracy", "balanced", "saver")
 
 
 @dataclass
@@ -48,7 +59,7 @@ class Config:
     vad_speech_pad_ms: int
     max_chunk_s: float
     continuous_chunk_s: float
-    partial_interval_s: float
+    compute_profile: str
     # speakers
     speakers: bool
     speaker_model: str
@@ -56,21 +67,45 @@ class Config:
     # output
     output_dir: str
     save_audio: bool
+    # obsidian notes
+    obsidian_vault: str
+    obsidian_template: str
+    obsidian_modules: str
+    obsidian_attachments: str
+    llm_model: str
+    llama_server: str
+    llm_context: int
     # window
     panel_width: float
     background_opacity: float
 
     @property
+    def models_path(self) -> Path:
+        return resolve(self.models_dir).resolve()
+
+    @property
     def model_path(self) -> Path:
-        return (CONFIG_PATH.parent / self.models_dir / f"ggml-{self.asr_model}.bin").resolve()
+        return self.models_path / f"ggml-{self.asr_model}.bin"
 
     @property
     def speaker_model_path(self) -> Path:
-        return (CONFIG_PATH.parent / self.models_dir / self.speaker_model).resolve()
+        return self.models_path / self.speaker_model
+
+    @property
+    def vault_path(self) -> Path | None:
+        return Path(self.obsidian_vault) if self.obsidian_vault else None
+
+    @property
+    def llm_model_path(self) -> Path:
+        return self.models_path / self.llm_model
+
+    @property
+    def llama_server_path(self) -> Path:
+        return resolve(self.llama_server)
 
     @property
     def output_path(self) -> Path:
-        return (CONFIG_PATH.parent / self.output_dir).resolve()
+        return resolve(self.output_dir).resolve()
 
 
 def _check_type(key: str, value, expected: type):
@@ -108,6 +143,8 @@ def load(path: Path = CONFIG_PATH) -> Config:
         raise ValueError(f"config.yaml: segmentation must be one of {SEGMENTATION_MODES}, got {cfg.segmentation!r}")
     if cfg.beam_size < 1:
         raise ValueError("config.yaml: beam_size must be 1 or more")
+    if cfg.compute_profile not in COMPUTE_PROFILES:
+        raise ValueError(f"config.yaml: compute_profile must be one of {COMPUTE_PROFILES}, got {cfg.compute_profile!r}")
     for key in ("panel_width", "background_opacity"):
         if not 0 < getattr(cfg, key) <= 1:
             raise ValueError(f"config.yaml: {key} must be above 0 and at most 1")
