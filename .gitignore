@@ -1,27 +1,14 @@
 # Python
 __pycache__/
 *.pyc
-*.pyo
 .venv/
-*.egg-info/
 
-# Environments / secrets
-.env
-config.yaml            # keep config.yaml.example in git; real config is local
-
-# Large media & generated outputs (keep code, not data)
-data/
-output/
-*.mp3
-*.mp4
-*.eaf
-preview*.html
-*.tar.zst
-*.tgz
-
-# Ollama models (huge; live under $OLLAMA_MODELS)
-ollama/
+# Whisper models (large; setup.ps1 downloads them)
 models/
+
+# Recorded sessions and your module list
+transcripts/
+modules.json
 
 # OS / editor
 .DS_Store

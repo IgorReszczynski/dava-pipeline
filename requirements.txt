@@ -1,0 +1,14 @@
+# Installed by setup.ps1. pywhispercpp is not listed: setup.ps1 compiles it from source
+# with GGML_VULKAN=1 so Whisper runs on the AMD GPU. silero-vad is installed with
+# --no-deps (only its ONNX model is used, so torch is never needed).
+numpy==2.5.4
+onnxruntime==1.31.1
+PySide6-Essentials==6.12.0
+PyYAML==6.0.3
+sounddevice==0.5.6
+soundfile==0.14.0
+soxr==1.1.0
+# pywhispercpp runtime dependencies
+platformdirs==4.14.3
+requests==2.34.2
+tqdm==4.70.1

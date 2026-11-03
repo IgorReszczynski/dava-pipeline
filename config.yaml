@@ -1,36 +1,47 @@
-# DAVA Batch Processing Pipeline Configuration
+# Lecture Live configuration
+# Runs fully offline: Whisper runs in whisper.cpp on the AMD GPU through Vulkan (no CUDA).
+# Every key must be present. The app writes the choices made in its window back into this file.
 
-# Stage control
-stage: 2
-stop_stage: 2
+# ASR Configuration (Whisper)
+asr_backend: "whisper.cpp"         # the only engine: whisper.cpp built with GGML_VULKAN=1
+asr_model: "large-v3-turbo-q8_0"   # loads <models_dir>/ggml-<asr_model>.bin
+lang: ""                           # language code ("en", "de", "pl", ...); "" = Whisper detects it for every chunk
+models_dir: "models"               # relative to this file
+gpu_device: 0                      # Vulkan GPU index (0 = the Radeon 780M)
+flash_attn: true
+n_threads: 4                       # CPU threads for the parts of whisper.cpp that run on the CPU
+beam_size: 5                       # 1 = greedy decoding
+no_speech_thold: 1.0               # whisper.cpp discards a window's text when its no-speech probability is above this; 1.0 = never discard
+use_context: true                  # give Whisper the transcript so far as its prompt
+initial_prompt: ""                 # course vocabulary: names and terms Whisper should spell right
 
+# Audio input
+input_device: "Microphone Array (Realtek(R) Audio)"                   # microphone name; "" = the Windows default input
+raw_capture: true                  # WASAPI raw mode: bypass Windows/driver mic effects (beamforming, noise suppression)
+input_gain_db: 0.0                 # manual gain, applied to everything (meter, VAD, recording, Whisper)
+agc: true                          # bring each chunk's speech level to agc_target_dbfs before Whisper
+agc_target_dbfs: -20.0
+agc_max_gain_db: 30.0
+highpass_hz: 80.0                  # removes rumble below this (projector fans, footsteps); 0 = off
 
-# Data paths
-data_dir: "/data/arfarh/ScriptsForVoxBlink2-main/AV_VoxBlinkdata"  # Directory to search for files
-file_extension: "mp4"  # File extension to search for (mp4, mp3, wav, flac, etc.)
-csv_file: "/home/arfarh/DAVA/VoxBlink2_mp4_manifest.csv"  # Output manifest file (stage 1) or input file (stage 2)
+# Segmentation
+segmentation: "vad"                # "vad": Silero VAD cuts at pauses and skips silence; "continuous": every second of audio goes to Whisper
+vad_threshold: 0.35                # speech probability; lower catches quieter, more distant speech
+vad_min_silence_ms: 600            # length of pause that ends a chunk
+vad_speech_pad_ms: 300             # audio kept from before speech starts
+max_chunk_s: 25.0                  # vad mode: a chunk this long is cut at its quietest point
+continuous_chunk_s: 15.0           # continuous mode: chunk length (cut at the quietest point of its last 2 s)
+partial_interval_s: 2.0            # how often the unfinished chunk is transcribed for the live preview
 
+# Speakers
+speakers: true                     # label who is speaking (voice embeddings on the CPU); never changes the text
+speaker_model: "wespeaker-voxceleb-resnet34-LM.onnx"   # in models_dir
+speaker_threshold: 0.45            # voice similarity (0-1) needed to count as the same speaker
 
-out_dir: "/home/arfarh/DAVA/VoxBlink2_out_my_pipeline3"  # Output directory for processed files
+# Output
+output_dir: "transcripts"          # default parent folder for new modules; relative to this file
+save_audio: true                   # also save the 16 kHz mono recording as FLAC
 
-# ASR Configuration
-asr_backend: "transformers"  # "transformers" | "openai"
-asr_model: "distil-whisper/distil-large-v3.5"  # ASR model name
-lang: ""  # Language code (empty for auto-detection)
-lang_detection_model: "base"  # tiny, base, small, medium, large
-
-# Processing Configuration
-gpu_index: 6
-batch_size: 32  # Number of files to process before generating speaker JSON
-num_speakers: ""  # Number of speakers (empty for auto-detection)
-hf_token: ""  # HuggingFace token for diarization
-
-# Topic Detection Configuration
-enable_topic_detection: true
-topic_model_id: "Qwen/Qwen3-0.6B"
-qwen_python_path: "/local/scratch/arfarh/Qwen/qwen3-env/bin/python3"  # Qwen virtual environment
-topic_verbose: false
-
-# Python Environment Paths
-dava_python_path: "/home/arfarh/DAVA/dava-env/bin/python"  # (main pipeline)
-
+# Window (docked to the right edge of the screen, top to bottom)
+panel_width: 0.30                  # share of the screen width
+background_opacity: 0.88           # 1.0 = solid; text always stays solid

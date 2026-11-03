@@ -1,114 +1,140 @@
-# DAVA: Data Audio/Video Analysis
+# Lecture Live
 
-Local, end-to-end pipeline that turns a recording into a transcribed, diarized,
-annotated, and searchable document, with an ELAN export for linguistic work and a
-semantic, cross-lingual (DE / EN / FR) question-and-answer that cites audio
-timestamps. Nothing is sent to an outside service: transcription, analysis, and
-answer generation all run on your own machine.
+A Windows desktop app that transcribes a lecture live, while you sit in it. Whisper
+(large-v3-turbo) runs on the laptop's own AMD GPU through Vulkan, so nothing goes to the
+internet and no NVIDIA card or CUDA is needed.
 
-## What it does
+## Setup
 
-Six stages, from raw audio to answers:
+Needs Python 3.12 (with the `py` launcher), Visual Studio 2022 Build Tools with the C++
+workload, CMake, the [Vulkan SDK](https://vulkan.lunarg.com), and the AMD graphics driver.
 
-1. Clean the audio (remove music and noise, level the loudness).
-2. Transcribe, identify speakers, and align (WhisperX).
-3. Analyse: named entities, sentiment, emotion, and topics.
-4. Export to ELAN (a `.eaf` file for annotation tools).
-5. Explore in one Streamlit dashboard.
-6. Ask the document: a local retrieval-augmented question-and-answer that cites
-   the exact moments in the audio.
-
-## Two ways to use it
-
-- **All in the dashboard.** Open the dashboard, go to the `Transcribe` tab, upload
-  an audio or video file, and it runs stages 1 and 2 for you. Then press
-  `Run analysis` and explore, ask, and export. No command line needed.
-- **From the command line.** Run the pipeline scripts directly, which is handy for
-  batches or on a headless server. See the quick start below and `ANALYSIS.md`.
-
-Either way you get the same result: a WhisperX JSON transcript enriched with
-analysis, an ELAN export, and a dashboard to explore and question it.
-
-## Quick start
-
-DAVA uses two conda environments so the heavy speech-recognition stack does not
-clash with the analysis and dashboard stack.
-
-```bash
-# 1a. transcription environment (GPU machine)
-conda create -n pipeline python=3.10 -y && conda activate pipeline
-pip install -r requirements_pipeline.txt
-conda install -c conda-forge ffmpeg -y
-
-# 1b. analysis / dashboard / question-and-answer environment
-conda create -n dava_env python=3.10 -y && conda activate dava_env
-pip install -r requirements_dava_env.txt
-python -m spacy download xx_ent_wiki_sm
-
-# 2. (command-line route) preprocess + transcribe   (env: pipeline)
-python pipeline/preprocess_audio_for_asr.py \
-    --input data/x.mp3 --output data/x_16k.wav --device cuda
-python pipeline/process_single_file_pipeline_AG.py \
-    --episode_path data/x_16k.wav --out_dir ./output --gpu_index 0 \
-    --language de --asr_backend openai --hf_token <HF_TOKEN>
-
-# 3. open the dashboard   (env: dava_env)
-streamlit run dashboard/app.py
+```powershell
+.\setup.ps1             # everything, including the models (874 MB Whisper + 25 MB speaker model)
+.\setup.ps1 -SkipModel  # everything except the models, e.g. on slow Wi-Fi
 ```
 
-No NVIDIA GPU (laptop, Apple Silicon Mac)? Everything also runs on the CPU, just
-more slowly. Use `--device cpu --asr_backend faster-whisper` for transcription
-(int8 on the CPU, about twice as fast as the OpenAI engine there), and skip
-the Demucs cleaning step for clean recordings, since it is very slow on a CPU.
-`--asr_model small` trades some accuracy for speed; the CPU default is
-`large-v3-turbo`.
+The script creates the venv `~\.venvs\lecture-live`, compiles whisper.cpp with Vulkan, downloads
+the models to `models\` (resuming if interrupted), and adds a **Lecture Live** shortcut to the
+desktop and Start menu. Run it again at any time; it skips what is already done.
 
-To try the dashboard immediately without transcribing anything, launch it and load
-the bundled sample `samples/sample_clean16k_whisperx.json` in the sidebar, then
-press `Run analysis`.
+## Using it
 
-> **Note.** The `pipeline` environment needs `demucs` for the audio-cleaning step
-> (it is listed in `requirements_pipeline.txt`). If you created the environment
-> earlier, install it with `conda activate pipeline && pip install "demucs>=4.0"`,
-> or untick `Clean audio first` in the Transcribe tab to skip that step.
+The app opens as a panel on the right edge of the screen, from the top down to the taskbar.
+It reserves that strip the way the taskbar does, so maximized windows fit beside it instead
+of covering it. Minimizing gives the space back. The panel background is slightly
+see-through; the text stays solid.
 
-## The dashboard
+1. Pick the module (course) the lecture belongs to. **Add module** takes a name and, if you
+   want, any folder on your disk (**Choose folder…**); otherwise the module gets a folder under
+   `transcripts\`. The bin icon only removes a module from the list; its folder stays.
+2. Check the level bar. The dot lights up when the voice detector hears speech. The gear
+   opens the settings: microphone, language, silence mode, gain, switches, vocabulary.
+3. Press the round record button (or Ctrl+R). It turns into a rounded square while recording.
+   Finished text appears with timestamps and speaker labels. The grey italic line is a live
+   preview of the sentence still being spoken; it is replaced when that part is final.
+4. Press it again to stop. The app finishes the audio it already has, then saves the session.
+5. **Export** (the arrow icon) saves the lecture as text, subtitles, the audio recording, or the
+   transcript read aloud.
 
-`streamlit run dashboard/app.py` opens one app with ten tabs:
+The module name at the top switches module (when not recording).
 
-| Tab | What it shows |
+### Speakers
+
+With **Tell speakers apart** on, every Whisper segment gets a voice embedding (WeSpeaker
+ResNet34, on the CPU) and joins the closest voice heard so far, or becomes a new one:
+Speaker 1, Speaker 2, and so on. It only labels the text, never changes it. From one microphone
+at the back this is a best effort: the lecturer is usually tracked well, short questions from
+the room less reliably. `speaker_threshold` in `config.yaml` sets how similar two voices must
+be to count as one (lower merges more, higher splits more).
+
+### Export
+
+| Choice | File |
 |---|---|
-| Transcribe | Upload audio or video and run the speech-to-text pipeline in the browser. |
-| Overview | Length, word count, speakers, main language, and who spoke the most. |
-| Words | The most frequent words, as a cloud and a ranked chart. |
-| Topics | The main themes, discovered automatically. |
-| Sentiment & Emotion | The tone over time and its overall balance. |
-| Entities | People, places, and organisations mentioned. |
-| Transcript | The full text, by speaker, with timecodes. |
-| ELAN | A playable, time-aligned tier timeline; export to ELAN. |
-| Ask | Ask a question and get an answer with timestamps. |
-| Export | Download the transcript JSON, the figures, and the `.eaf`. |
+| Transcript (text) | `.txt`, exactly as saved: `[hh:mm:ss] Speaker N: text` |
+| Subtitles with timestamps | `.srt`, one cue per Whisper segment, to play alongside the recording |
+| Lecture recording (audio) | `.mp3` or `.wav` of what the app recorded |
+| Transcript read aloud (audio) | `.wav` or `.mp3` spoken by the offline Windows voice |
 
-The transcript JSON can be downloaded from the `Export` tab at any time, and also
-directly from the `Transcribe` tab as soon as a transcription finishes.
+Export uses the lecture shown in the window; before recording anything it asks which
+lecture folder to export.
 
-If the dashboard runs on a remote GPU server, forward the port to your laptop:
+The look follows Material 3 Expressive: the M3 shape scale with the Expressive corner radii
+(20 for cards, 32 for the panel, full for buttons), M3 tonal colors that follow the Windows
+light or dark mode, a record button that morphs shape, M3 switches and a connected button group.
 
-```bash
-ssh -L 8501:localhost:8501 <user>@<server>
-# then open http://localhost:8501
+### From the back of the room
+
+- Leave **Raw microphone** on. Laptop mic arrays beamform toward the person at the keyboard and run
+  noise suppression tuned for close speech. Both can treat a lecturer at the front as noise.
+  Raw mode bypasses them.
+- Raise **Gain** until the level bar fills past the middle while the lecturer talks. It turns
+  red when samples clip; lower the gain if it does.
+- Leave **Auto level** on. Each chunk's speech is brought to −20 dBFS before Whisper.
+- Use **Hear last 5 s** with headphones to check what the app actually hears.
+- Type course names and terms into **Vocabulary** so Whisper spells them right.
+- Point the laptop's front edge at the lecturer and keep it off a desk that people tap or
+  bump. A USB or clip-on mic aimed at the front helps more than any setting.
+
+### Silence
+
+| Mode | What reaches Whisper |
+|---|---|
+| **Skip it (VAD)** | Silero VAD finds speech; a 0.6 s pause ends a chunk. Silence between chunks is not sent. |
+| **Send all audio** | Back-to-back 15 s chunks; every second of audio is sent, including silence. |
+
+Long chunks are cut at their quietest moment, and every sample is sent exactly once.
+
+## What it saves
+
+Each lecture goes in `<module folder>\<date_time>\`:
+
+| File | Contents |
+|---|---|
+| `transcript.txt` | `[hh:mm:ss] Speaker N: text`, a new line per chunk and per change of speaker |
+| `segments.jsonl` | per chunk: start, end, language, gain, inference time, Whisper's segments with timestamps and speaker; also audio-overflow events |
+| `audio.flac` | the 16 kHz mono recording, as the app heard it (turn off with `save_audio`) |
+| `session.json` | module, device, GPU, settings, start and end time, error if any |
+
+The module list itself is kept in `modules.json` next to `config.yaml`.
+| `log.txt` | everything logged during the session, including whisper.cpp |
+
+## Output is not altered, errors are not hidden
+
+- The text is exactly what Whisper returned: no trimming, filtering, deduplication or
+  hallucination removal. whisper.cpp's own no-speech drop is off (`no_speech_thold: 1.0`).
+- Nothing falls back silently. If whisper.cpp starts without the GPU, the app refuses to run
+  instead of quietly using the CPU. A failed decode, an unknown language code, a broken model
+  file or a microphone that will not open all stop with the full error. Audio the device
+  dropped is reported in the window and logged.
+- There are no limits on session length or backlog. If Whisper falls behind, the waiting audio
+  is shown and processed in order.
+
+## Settings
+
+`config.yaml` holds every setting, with comments. The Whisper ASR block is at the top:
+`asr_model`, `lang`, beam size, `gpu_device`. `speakers`, `speaker_threshold` control speaker
+labels. `panel_width` (share of the screen width) and
+`background_opacity` (1.0 = solid) set the panel. The app writes the choices you make in its
+window back into the file.
+
+## How it works
+
+```
+mic (WASAPI, raw) -> mono -> 16 kHz -> 80 Hz high-pass -> gain -> Silero VAD (onnxruntime, CPU)
+    -> segmenter (VAD or continuous) -> Whisper large-v3-turbo (whisper.cpp + Vulkan, Radeon GPU)
+    -> speaker labels (WeSpeaker, onnxruntime, CPU) -> window + files in the module's folder
 ```
 
-## Documentation
+Code is in `lecturelive/`: `audio.py` (capture and signal chain), `vad.py`, `segmenter.py`,
+`engine.py` (whisper.cpp bindings), `speakers.py`, `live.py` (threads and session files),
+`modules.py`, `export.py`, `ui.py` (window), `dock.py` (reserving the right edge of the screen).
 
-- **[ANALYSIS.md](ANALYSIS.md)** is the full end-to-end guide: environment setup,
-  the Ollama install, every stage with its exact commands, the output format, and
-  troubleshooting.
-- **[docs/GUIDE.md](docs/GUIDE.md)** is the same guide written for a non-technical
-  reader from scratch, with a glossary of every acronym and plain-language
-  explanations of the models (Whisper, BERT, Qwen, and the rest).
-- **[analysis/README.md](analysis/README.md)** documents the analysis package
-  (named entities, sentiment, emotion, topics) and its command-line use.
+## Troubleshooting
 
-Everything is open source and runs locally, in keeping with the FAIR and Open
-Science principles of CLARIN-CH.
+- **"whisper.cpp found no GPU"**: update the AMD driver and check `vulkaninfo --summary`.
+- **"The model file is incomplete"**: run `.\setup.ps1` again to resume the download.
+- **The microphone will not open with Raw microphone on**: the driver does not support raw
+  capture. Switch it off, and turn off *Audio enhancements* for the mic in Windows Settings → Sound.
+- Start from a terminal with `run.cmd` to see errors printed there as well.
